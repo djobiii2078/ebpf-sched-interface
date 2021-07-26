@@ -1,0 +1,11 @@
+ops	ebpf	no_ebpf
+1_thread	2.768	2.8
+2_thread	2.77	2.82
+4_thread	3.009	3.11
+6_thread	3.4609	3.501
+8_thread	3.601	3.67
+10_thread	4.68	4.72
+12_thread	5.52	5.62
+14_thread	6.38	6.42
+16_thread	7.41	7.5
+

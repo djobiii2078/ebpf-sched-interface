@@ -1,0 +1,5 @@
+ops	no_ebpf	ebpf
+__prev_next_entity	51.47	61.23
+__pick_last_entity	61.21	71.43
+__pick_first_entity	35.1	42.9
+
