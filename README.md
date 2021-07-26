@@ -72,7 +72,6 @@ sudo ./load_bpf.sh
 First, compile the benchmark programs:
 
 ```bash
-cd bench/
 g++ -o -lrt bench.c -o bench.o
 ./bench.o <num_threads> # runs with 8 independent threads by default
 ```
