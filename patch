@@ -1,0 +1,455 @@
+diff -ru linux-5.8/arch/x86/entry/syscalls/syscall_64.tbl linux-5.8-sched/arch/x86/entry/syscalls/syscall_64.tbl
+--- linux-5.8/arch/x86/entry/syscalls/syscall_64.tbl	2020-08-02 23:21:45.000000000 +0200
++++ linux-5.8-sched/arch/x86/entry/syscalls/syscall_64.tbl	2021-07-25 18:52:33.066625548 +0200
+@@ -360,6 +360,7 @@
+ 437	common	openat2			sys_openat2
+ 438	common	pidfd_getfd		sys_pidfd_getfd
+ 439	common	faccessat2		sys_faccessat2
++440 common 	sched_set_bpf_scheduler sys_sched_set_bpf_scheduler
+ 
+ #
+ # x32-specific system call numbers start at 512 to avoid cache impact
+
+diff -ru linux-5.8/include/linux/bpf_types.h linux-5.8-sched/include/linux/bpf_types.h
+--- linux-5.8/include/linux/bpf_types.h	2020-08-02 23:21:45.000000000 +0200
++++ linux-5.8-sched/include/linux/bpf_types.h	2021-07-24 19:45:17.917008264 +0200
+@@ -76,6 +76,9 @@
+ #endif /* CONFIG_BPF_LSM */
+ #endif
+ 
++BPF_PROG_TYPE(BPF_PROG_TYPE_SCHED, sched,
++             struct bpf_sched, struct bpf_sched_kern)
++
+ BPF_MAP_TYPE(BPF_MAP_TYPE_ARRAY, array_map_ops)
+ BPF_MAP_TYPE(BPF_MAP_TYPE_PERCPU_ARRAY, percpu_array_map_ops)
+ BPF_MAP_TYPE(BPF_MAP_TYPE_PROG_ARRAY, prog_array_map_ops)
+diff -ru linux-5.8/include/linux/filter.h linux-5.8-sched/include/linux/filter.h
+--- linux-5.8/include/linux/filter.h	2020-08-02 23:21:45.000000000 +0200
++++ linux-5.8-sched/include/linux/filter.h	2021-07-24 20:42:17.388924689 +0200
+@@ -28,6 +28,8 @@
+ #include <uapi/linux/filter.h>
+ #include <uapi/linux/bpf.h>
+ 
++#define MAX_PIDS 1024 //Just for test purposes 
++
+ struct sk_buff;
+ struct sock;
+ struct seccomp_data;
+@@ -38,6 +40,15 @@
+ struct ctl_table;
+ struct ctl_table_header;
+ 
++/*
++* Struct about the pids to control
++*/
++
++struct bpf_sched_kern {
++	u64 pids[MAX_PIDS];
++	u64 length;
++};
++
+ /* ArgX, context and stack frame pointer register positions. Note,
+  * Arg1, Arg2, Arg3, etc are used as argument mappings of function
+  * calls in BPF_CALL instruction.
+diff -ru linux-5.8/include/linux/syscalls.h linux-5.8-sched/include/linux/syscalls.h
+--- linux-5.8/include/linux/syscalls.h	2020-08-02 23:21:45.000000000 +0200
++++ linux-5.8-sched/include/linux/syscalls.h	2021-07-25 22:30:59.015927840 +0200
+@@ -1423,5 +1423,5 @@
+ long compat_ksys_semtimedop(int semid, struct sembuf __user *tsems,
+ 			    unsigned int nsops,
+ 			    const struct old_timespec32 __user *timeout);
+-
++asmlinkage long sys_sched_set_bpf_scheduler(int val);
+ #endif
+diff -ru linux-5.8/include/uapi/linux/bpf.h linux-5.8-sched/include/uapi/linux/bpf.h
+--- linux-5.8/include/uapi/linux/bpf.h	2020-08-02 23:21:45.000000000 +0200
++++ linux-5.8-sched/include/uapi/linux/bpf.h	2021-07-24 21:55:26.974595971 +0200
+@@ -12,7 +12,7 @@
+ #include <linux/bpf_common.h>
+ 
+ /* Extended instruction set based on top of classic BPF */
+-
++#define MAX_PIDS 1024
+ /* instruction classes */
+ #define BPF_JMP32	0x06	/* jmp mode in word width */
+ #define BPF_ALU64	0x07	/* alu mode in double word width */
+@@ -189,6 +189,7 @@
+ 	BPF_PROG_TYPE_STRUCT_OPS,
+ 	BPF_PROG_TYPE_EXT,
+ 	BPF_PROG_TYPE_LSM,
++	BPF_PROG_TYPE_SCHED
+ };
+ 
+ enum bpf_attach_type {
+@@ -226,9 +227,14 @@
+ 	BPF_CGROUP_INET4_GETSOCKNAME,
+ 	BPF_CGROUP_INET6_GETSOCKNAME,
+ 	BPF_XDP_DEVMAP,
++	BPF_SCHED,
+ 	__MAX_BPF_ATTACH_TYPE
+ };
+ 
++struct bpf_sched {
++	u64 pids[MAX_PIDS];
++};
++
+ #define MAX_BPF_ATTACH_TYPE __MAX_BPF_ATTACH_TYPE
+ 
+diff -ru linux-5.8/kernel/bpf/syscall.c linux-5.8-sched/kernel/bpf/syscall.c
+--- linux-5.8/kernel/bpf/syscall.c	2020-08-02 23:21:45.000000000 +0200
++++ linux-5.8-sched/kernel/bpf/syscall.c	2021-07-25 22:30:18.499827257 +0200
+@@ -2748,6 +2748,11 @@
+ 	return err;
+ }
+ 
++
++int _sched_bpf_prog_attach(const union bpf_attr *attr, struct bpf_prog *prog);
++int _sched_bpf_prog_detach(const union bpf_attr *attr);
++
++
+ static int bpf_prog_attach_check_attach_type(const struct bpf_prog *prog,
+ 					     enum bpf_attach_type attach_type)
+ {
+@@ -2815,6 +2820,8 @@
+ 		return BPF_PROG_TYPE_CGROUP_SOCKOPT;
+ 	case BPF_TRACE_ITER:
+ 		return BPF_PROG_TYPE_TRACING;
++	case BPF_SCHED:
++		return BPF_PROG_TYPE_SCHED;
+ 	default:
+ 		return BPF_PROG_TYPE_UNSPEC;
+ 	}
+@@ -2870,6 +2877,9 @@
+ 	case BPF_PROG_TYPE_SOCK_OPS:
+ 		ret = cgroup_bpf_prog_attach(attr, ptype, prog);
+ 		break;
++	case BPF_PROG_TYPE_SCHED:
++		ret = _sched_bpf_prog_attach(attr,prog);
++		break;
+ 	default:
+ 		ret = -EINVAL;
+ 	}
+@@ -2906,6 +2916,8 @@
+ 	case BPF_PROG_TYPE_CGROUP_SYSCTL:
+ 	case BPF_PROG_TYPE_SOCK_OPS:
+ 		return cgroup_bpf_prog_detach(attr, ptype);
++	case BPF_PROG_TYPE_SCHED:
++		return _sched_bpf_prog_detach(attr);
+ 	default:
+ 		return -EINVAL;
+ 	}
+diff -ru linux-5.8/kernel/sched/core.c linux-5.8-sched/kernel/sched/core.c
+--- linux-5.8/kernel/sched/core.c	2020-08-02 23:21:45.000000000 +0200
++++ linux-5.8-sched/kernel/sched/core.c	2021-07-25 18:52:29.834625687 +0200
+@@ -5303,6 +5303,30 @@
+ }
+ 
+ /**
++ * Set bpf scheduler parameter for every rq
++ * @val: the value that sets bpf scheduling options
++ * 0 for shadow, 1 for active
++ * 
++ * Return : On success, 1 and if anything goes wrong 0.
++ */
++
++SYSCALL_DEFINE1(sched_set_bpf_scheduler, u64, val)
++{
++	struct rq_flags rf;
++	int i; 
++	for_each_possible_cpu(i) {
++		
++		struct rq *rq;
++		rq = cpu_rq(i);
++		rq_lock(rq, &rf);
++		init_bpf_cfs(&rq->cfs,val);
++		rq_unlock(rq, &rf);
++	}
++	return 0;
++
++}
++
++/**
+  * sys_sched_setscheduler - set/change the scheduler policy and RT priority
+  * @pid: the pid in question.
+  * @policy: new policy.
+
+diff -ru linux-5.8/kernel/sched/debug.c linux-5.8-sched/kernel/sched/debug.c
+--- linux-5.8/kernel/sched/debug.c	2020-08-02 23:21:45.000000000 +0200
++++ linux-5.8-sched/kernel/sched/debug.c	2021-07-24 22:33:05.208141019 +0200
+@@ -499,7 +499,7 @@
+ 
+ 	raw_spin_lock_irqsave(&rq->lock, flags);
+ 	if (rb_first_cached(&cfs_rq->tasks_timeline))
+-		MIN_vruntime = (__pick_first_entity(cfs_rq))->vruntime;
++		MIN_vruntime = (__pick_first_entity(cfs_rq,&cfs_rq->_bpf_active))->vruntime;
+ 	last = __pick_last_entity(cfs_rq);
+ 	if (last)
+ 		max_vruntime = last->vruntime;
+Seulement dans linux-5.8-sched/kernel/sched: debug.o
+Seulement dans linux-5.8-sched/kernel/sched: .debug.o.cmd
+diff -ru linux-5.8/kernel/sched/fair.c linux-5.8-sched/kernel/sched/fair.c
+--- linux-5.8/kernel/sched/fair.c	2020-08-02 23:21:45.000000000 +0200
++++ linux-5.8-sched/kernel/sched/fair.c	2021-07-26 10:32:34.460838246 +0200
+@@ -23,6 +23,7 @@
+ #include "sched.h"
+ 
+ #include <trace/events/sched.h>
++#include <linux/ktime.h>
+ 
+ /*
+  * Targeted preemption latency for CPU-bound tasks:
+@@ -86,6 +87,44 @@
+ 
+ const_debug unsigned int sysctl_sched_migration_cost	= 500000UL;
+ 
++struct bpf_prog __rcu *_bpf_prog;
++EXPORT_SYMBOL(_bpf_prog);
++
++struct bpf_sched_kern _bpf_g_context;
++EXPORT_SYMBOL(_bpf_g_context);
++
++
++int _sched_bpf_prog_attach(const union bpf_attr *attr, struct bpf_prog *prog)
++{
++	rcu_assign_pointer(_bpf_prog, prog);
++	return 0;
++}
++
++int _sched_bpf_prog_detach(const union bpf_attr *attr)
++{
++	rcu_assign_pointer(_bpf_prog, NULL);
++	return 0;
++}
++
++const struct bpf_prog_ops sched_prog_ops = {};
++
++static const struct bpf_func_proto *
++sched_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
++{
++	return bpf_base_func_proto(func_id);
++}
++
++static bool sched_is_valid_access(int off, int size, enum bpf_access_type type, const struct bpf_prog *prog, struct bpf_insn_access_aux *info){
++	return true;
++}
++
++const struct bpf_verifier_ops sched_verifier_ops = {
++	.get_func_proto = sched_func_proto,
++	.is_valid_access = sched_is_valid_access,
++};
++
++
++
+ int sched_thermal_decay_shift;
+ static int __init setup_sched_thermal_decay_shift(char *str)
+ {
+@@ -609,24 +648,100 @@
+ 	rb_erase_cached(&se->run_node, &cfs_rq->tasks_timeline);
+ }
+ 
+-struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
++struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq, unsigned int _bpf_active)
+ {
+ 	struct rb_node *left = rb_first_cached(&cfs_rq->tasks_timeline);
+ 
++	u64 start_time, end_time;
++	start_time = ktime_get_ns();
++
+ 	if (!left)
+ 		return NULL;
+ 
+-	return rb_entry(left, struct sched_entity, run_node);
++	struct sched_entity *se_return = rb_entry(left, struct sched_entity, run_node);
++
++
++	if(_bpf_active)
++	{
++		/*
++		* Gets the list of forbidden entries 
++		* and skip if the chosen one is one of them 
++		* @TODO: for the interface, think of a way to update dynamically the list
++		*/
++		struct bpf_prog *_local_bpf_prog; 
++
++		rcu_read_lock();
++		_local_bpf_prog = rcu_dereference(_bpf_prog);
++
++		if(_local_bpf_prog)
++		{
++			struct task_struct *p;
++			int _bpf_return;
++
++			_bpf_return = BPF_PROG_RUN(_local_bpf_prog, &_bpf_g_context);
++
++			pr_info("ebpf prog detected");
++
++			if(!(&(_bpf_g_context).length)) pr_info("ebpf len recv %d",(&(_bpf_g_context).length));
++
++			p = task_of(se);
++		}
++		rcu_dereference(_bpf_prog);
++
++		rcu_read_unlock();		
++
++	}
++	end_time = ktime_get_ns();
++	pr_info("ebpf/- __pick_first_entity %d",(end_time-start_time));
++
++	return se_return(left, struct sched_entity, run_node);
+ }
+ 
+-static struct sched_entity *__pick_next_entity(struct sched_entity *se)
++static struct sched_entity *__pick_next_entity(struct sched_entity *se, unsigned int _bpf_active)
+ {
+ 	struct rb_node *next = rb_next(&se->run_node);
++	u64 start_time, end_time;
++	start_time = ktime_get_ns();
+ 
+ 	if (!next)
+ 		return NULL;
+ 
+-	return rb_entry(next, struct sched_entity, run_node);
++	struct sched_entity *se_return = rb_entry(next, struct sched_entity, run_node);
++
++
++	if(_bpf_active)
++	{
++		/*
++		* Gets the list of forbidden entries 
++		* and skip if the chosen one is one of them 
++		* @TODO: for the interface, think of a way to update dynamically the list
++		*/
++		struct bpf_prog *_local_bpf_prog; 
++
++		rcu_read_lock();
++		_local_bpf_prog = rcu_dereference(_bpf_prog);
++
++		if(_local_bpf_prog)
++		{
++			struct task_struct *p;
++			int _bpf_return;
++
++			_bpf_return = BPF_PROG_RUN(_local_bpf_prog, &_bpf_g_context);
++
++			pr_info("ebpf prog detected");
++
++			if(!(&(_bpf_g_context).length)) pr_info("ebpf len recv %d",(&(_bpf_g_context).length));
++
++			p = task_of(se);
++		}
++		rcu_dereference(_bpf_prog);
++
++		rcu_read_unlock();		
++
++	}
++	end_time = ktime_get_ns();
++	pr_info("ebpf/- __pick_next_entity %d",(end_time-start_time));
++	return se_return;
+ }
+ 
+ #ifdef CONFIG_SCHED_DEBUG
+@@ -4366,7 +4481,7 @@
+ 	if (delta_exec < sysctl_sched_min_granularity)
+ 		return;
+ 
+-	se = __pick_first_entity(cfs_rq);
++	se = __pick_first_entity(cfs_rq,&cfs_rq->_bpf_active);
+ 	delta = curr->vruntime - se->vruntime;
+ 
+ 	if (delta < 0)
+@@ -4422,7 +4537,7 @@
+ static struct sched_entity *
+ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+ {
+-	struct sched_entity *left = __pick_first_entity(cfs_rq);
++	struct sched_entity *left = __pick_first_entity(cfs_rq,&cfs_rq->_bpf_active);
+ 	struct sched_entity *se;
+ 
+ 	/*
+@@ -4442,9 +4557,9 @@
+ 		struct sched_entity *second;
+ 
+ 		if (se == curr) {
+-			second = __pick_first_entity(cfs_rq);
++			second = __pick_first_entity(cfs_rq,&cfs_rq->_bpf_active);
+ 		} else {
+-			second = __pick_next_entity(se);
++			second = __pick_next_entity(se,&cfs_rq->_bpf_active);
+ 			if (!second || (curr && entity_before(curr, second)))
+ 				second = curr;
+ 		}
+@@ -10868,10 +10983,16 @@
+ 	}
+ }
+ 
++void init_bpf_cfs(struct cfs_rq *cfs_rq,u64 val)
++{
++	cfs_rq->_bpf_active=val;
++}
++
+ void init_cfs_rq(struct cfs_rq *cfs_rq)
+ {
+ 	cfs_rq->tasks_timeline = RB_ROOT_CACHED;
+ 	cfs_rq->min_vruntime = (u64)(-(1LL << 20));
++	cfs_rq->_bpf_active  = 0; //No bpf hooking 
+ #ifndef CONFIG_64BIT
+ 	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
+ #endif
+diff -ru linux-5.8/kernel/sched/sched.h linux-5.8-sched/kernel/sched/sched.h
+--- linux-5.8/kernel/sched/sched.h	2020-08-02 23:21:45.000000000 +0200
++++ linux-5.8-sched/kernel/sched/sched.h	2021-07-25 17:21:01.405045920 +0200
+@@ -66,6 +66,9 @@
+ #include <linux/task_work.h>
+ #include <linux/tsacct_kern.h>
+ 
++#include <linux/bpf.h>
++#include <linux/filter.h>
++
+ #include <asm/tlb.h>
+ 
+ #ifdef CONFIG_PARAVIRT
+@@ -96,6 +99,7 @@
+ extern void calc_global_load_tick(struct rq *this_rq);
+ extern long calc_load_fold_active(struct rq *this_rq, long adjust);
+ 
++
+ /*
+  * Helpers for converting nanosecond timing to jiffy resolution
+  */
+@@ -499,6 +503,7 @@
+ /* CFS-related fields in a runqueue */
+ struct cfs_rq {
+ 	struct load_weight	load;
++	u64 _bpf_active; /* flag to determine bpf hooking */
+ 	unsigned int		nr_running;
+ 	unsigned int		h_nr_running;      /* SCHED_{NORMAL,BATCH,IDLE} */
+ 	unsigned int		idle_h_nr_running; /* SCHED_IDLE */
+@@ -2207,7 +2212,7 @@
+ 
+ #endif
+ 
+-extern struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq);
++extern struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq,unsigned int _bpf_active);
+ extern struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq);
+ 
+ #ifdef	CONFIG_SCHED_DEBUG
+@@ -2228,6 +2233,7 @@
+ #endif /* CONFIG_NUMA_BALANCING */
+ #endif /* CONFIG_SCHED_DEBUG */
+ 
++extern void init_bpf_cfs(struct cfs_rq *cfs_rq, u64 val);
+ extern void init_cfs_rq(struct cfs_rq *cfs_rq);
+ extern void init_rt_rq(struct rt_rq *rt_rq);
+ extern void init_dl_rq(struct dl_rq *dl_rq);
+diff -ru linux-5.8/Makefile linux-5.8-sched/Makefile
+--- linux-5.8/Makefile	2020-08-02 23:21:45.000000000 +0200
++++ linux-5.8-sched/Makefile	2021-07-24 21:54:08.034512451 +0200
+@@ -2,7 +2,7 @@
+ VERSION = 5
+ PATCHLEVEL = 8
+ SUBLEVEL = 0
+-EXTRAVERSION =
++EXTRAVERSION = -sched-ebpf
+ NAME = Kleptomaniac Octopus
+ 
+ # *DOCUMENTATION*
