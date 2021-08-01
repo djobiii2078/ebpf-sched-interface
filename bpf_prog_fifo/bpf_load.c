@@ -21,7 +21,7 @@ int main(int argc, char **argv)
 	struct bpf_object *obj;
 	int ret, progfd;
 
-	ret = bpf_prog_load("bpf_program.o", BPF_PROG_TYPE_SCHED, &obj, &progfd);
+	ret = bpf_prog_load("bpf_prog_fifo.o", BPF_PROG_TYPE_SCHED, &obj, &progfd);
 	if (ret) {
 		printf("Failed to load bpf program\n");
 		exit(1);
